@@ -1,79 +1,66 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
-import plotly.express as px
-from datetime import datetime, timedelta
+import numpy as np
+import matplotlib.pyplot as plt
 
-# 1. 페이지 기본 설정
-st.set_page_config(page_title="3x 레버리지 대시보드", layout="wide")
+# 페이지 설정
+st.set_page_config(page_title="자산 시뮬레이터", layout="wide")
 
-st.title("🚀 UPRO / TQQQ / SOXL 모니터링")
+# 제목
+st.title("💰 내 자산 성장 시뮬레이터")
+st.caption("매달 저축하고 투자했을 때, 3년 뒤 얼마나 모일까?")
 
-# 2. 사이드바 설정 (기간 선택)
-st.sidebar.header("설정")
-days_lookback = st.sidebar.slider("조회 기간 (일)", 30, 3650, 365) # 기본 1년
+# 사이드바: 입력값 받기
+with st.sidebar:
+    st.header("설정 입력")
+    current_assets = st.number_input("현재 자산 (만원)", value=1000, step=100)
+    monthly_savings = st.number_input("월 저축/투자액 (만원)", value=150, step=10)
+    target_years = st.slider("목표 기간 (년)", 1, 10, 3)
+    annual_return = st.slider("예상 연 수익률 (%)", 0.0, 30.0, 8.0, 0.1)
 
-# 3. 데이터 로딩 함수 (캐시 적용 및 오류 처리 강화)
-@st.cache_data(ttl=300)  # 5분마다 데이터 갱신
-def load_data(tickers, days):
-    end_date = datetime.today()
-    start_date = end_date - timedelta(days=days)
+# 계산 로직
+months = target_years * 12
+monthly_rate = annual_return / 100 / 12
+
+data = []
+total_saved = current_assets # 원금 합계
+current_value = current_assets # 수익 포함 총 자산
+
+for m in range(1, months + 1):
+    # 수익 발생
+    interest = current_value * monthly_rate
+    # 저축 추가
+    current_value += interest + monthly_savings
+    total_saved += monthly_savings
     
-    # 딕셔너리로 받아서 안전하게 병합
-    data_dict = {}
-    for ticker in tickers:
-        try:
-            # 개별 다운로드로 안정성 확보
-            df = yf.download(ticker, start=start_date, end=end_date, progress=False)
-            if not df.empty:
-                # 'Adj Close'나 'Close' 중 있는 것 사용
-                if 'Adj Close' in df.columns:
-                    data_dict[ticker] = df['Adj Close']
-                else:
-                    data_dict[ticker] = df['Close']
-        except Exception as e:
-            st.error(f"{ticker} 로딩 실패: {e}")
-            
-    if data_dict:
-        # 데이터프레임 병합
-        combined_df = pd.DataFrame(data_dict)
-        return combined_df
-    else:
-        return pd.DataFrame()
+    data.append({
+        "개월차": m,
+        "원금(저축액)": round(total_saved),
+        "총 자산(수익포함)": round(current_value),
+        "수익금": round(current_value - total_saved)
+    })
 
-# 4. 메인 로직 실행
-tickers = ['UPRO', 'TQQQ', 'SOXL']
-df = load_data(tickers, days_lookback)
+# 데이터프레임 생성
+df = pd.read_json(pd.Series(data).to_json(orient='records'))
 
-if not df.empty:
-    # 결측치 처리 (주말/휴일 등으로 인한 빈 값은 앞의 값으로 채움)
-    df = df.ffill().dropna()
+# 메인 화면 구성
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.metric("목표 기간", f"{target_years}년 ({months}개월)")
+with col2:
+    st.metric("예상 최종 자산", f"{int(df.iloc[-1]['총 자산(수익포함)']):,} 만원")
+with col3:
+    st.metric("순수익", f"+{int(df.iloc[-1]['수익금']):,} 만원", delta_color="normal")
 
-    # 5. 차트 그리기
-    st.subheader("📈 주가 추이 비교")
-    
-    # 정규화 여부 체크박스 (시작점을 100으로 맞춤)
-    normalize = st.checkbox("수익률 기준 비교 (시작일=0%)", value=True)
-    
-    plot_df = df.copy()
-    if normalize:
-        plot_df = (plot_df / plot_df.iloc[0] - 1) * 100
-        y_label = "수익률 (%)"
-    else:
-        y_label = "주가 ($)"
+st.divider()
 
-    fig = px.line(plot_df, x=plot_df.index, y=plot_df.columns, 
-                  labels={"value": y_label, "variable": "ETF", "Date": "날짜"})
-    st.plotly_chart(fig, use_container_width=True)
+# 차트 그리기
+st.subheader("📈 자산 성장 그래프")
+chart_data = df.set_index("개월차")[["총 자산(수익포함)", "원금(저축액)"]]
 
-    # 6. 최근 데이터 테이블 표시
-    st.subheader("📊 최근 5일 데이터")
-    st.dataframe(df.tail().sort_index(ascending=False).style.format("{:.2f}"))
+# 한글 폰트 이슈 방지를 위해 Streamlit 내장 차트 사용
+st.line_chart(chart_data, color=["#FF4B4B", "#31333F"])
 
-else:
-    st.error("데이터를 불러오지 못했습니다. 잠시 후 다시 시도하거나 티커를 확인해주세요.")
-
-# 7. 만약 TQQQ가 여전히 안 나온다면 캐시 삭제 버튼 제공
-if st.sidebar.button("데이터 강제 새로고침"):
-    st.cache_data.clear()
-    st.rerun()
+# 상세 데이터 테이블
+with st.expander("월별 상세 데이터 보기"):
+    st.dataframe(df, use_container_width=True)
