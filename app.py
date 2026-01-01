@@ -7,17 +7,17 @@ import math
 # --- 페이지 설정 ---
 st.set_page_config(page_title="VR & 적립식 백테스트", layout="wide")
 
-st.title("📊 라오어 전략 vs 적립식 존버 (호환성 개선판)")
+st.title("📊 라오어 전략 vs 적립식 vs 원금 비교")
 st.markdown("""
 **핵심 비교 포인트:**
-1. **Simple DCA (무지성 적립):** 월급 들어오면 그 날 바로 풀매수 (비교 기준)
-2. **무매법 (V1~V3, IBS):** 월급은 '대기 자금'으로 보관하다가, **익절(리셋) 시** 시드에 합산하여 스케일업
-3. **VR (Value Rebalancing):** 월급 입금 시 **Pool 추가 + 목표가치 상향** (로직 오작동 방지)
+1. **총 투입 원금 (점선):** 내가 실제로 넣은 돈 (이 선보다 위에 있어야 이득!)
+2. **Simple DCA (무지성 적립):** 월급 들어오면 그 날 바로 풀매수
+3. **무매법 & VR:** 현금 비중 조절 및 리밸런싱 전략
 """)
 
 # --- 사이드바 설정 ---
 st.sidebar.header("📝 기본 및 적립 설정")
-ticker = st.sidebar.selectbox("티커 (Ticker)", ["SOXL", "TQQQ", "TECL", "UPRO", "TSLA", "NVDA"])
+ticker = st.sidebar.selectbox("티커 (Ticker)", ["SOXL", "TQQQ", "TECL", "UPRO", "TSLA", "NVDA", "BITU"])
 start_date = st.sidebar.date_input("시작 날짜", value=pd.to_datetime("2021-01-01"))
 initial_capital = st.sidebar.number_input("초기 거치금 (USD)", value=10000, step=1000)
 
@@ -46,12 +46,10 @@ def get_data(ticker, start):
 
         # 2. 멀티 인덱스 컬럼(예: Price, Ticker) 처리 -> 1단 인덱스로 평탄화
         if isinstance(df.columns, pd.MultiIndex):
-            # level 0이 보통 Price Type (Close, Open 등)
             df.columns = df.columns.get_level_values(0)
 
         # 3. 필요한 컬럼(Close 또는 Adj Close) 찾기
         target_col = None
-        # 대소문자 구분 없이 찾기 위해 리스트 순회
         possible_cols = ['Adj Close', 'adj close', 'Close', 'close']
         for col in possible_cols:
             if col in df.columns:
@@ -59,14 +57,10 @@ def get_data(ticker, start):
                 break
 
         if target_col:
-            # 명시적으로 복사본 생성 (SettingWithCopyWarning 방지)
             df_clean = df[[target_col]].copy()
             df_clean.rename(columns={target_col: 'Close'}, inplace=True)
-            
-            # 데이터 타입 숫자로 강제 변환 및 결측치 제거
             df_clean['Close'] = pd.to_numeric(df_clean['Close'], errors='coerce')
             df_clean.dropna(inplace=True)
-            
             return df_clean
         else:
             return pd.DataFrame()
@@ -98,7 +92,7 @@ def run_simple_dca(df, initial_cap, monthly_amt, dep_day):
     return equity
 
 # =========================================================
-# 1. V1.0 (적립금 대기 -> 리셋 시 합산)
+# 1. V1.0
 # =========================================================
 def run_v1(df, initial_cap, splits, monthly_amt, dep_day):
     cash = initial_cap
@@ -117,7 +111,7 @@ def run_v1(df, initial_cap, splits, monthly_amt, dep_day):
             
         if shares > 0 and avg_price > 0:
             profit_rate = (price - avg_price) / avg_price
-            if profit_rate >= 0.1: # 10% 수익 시 리셋
+            if profit_rate >= 0.1:
                 cash += shares * price
                 shares = 0
                 avg_price = 0
@@ -138,7 +132,7 @@ def run_v1(df, initial_cap, splits, monthly_amt, dep_day):
     return equity
 
 # =========================================================
-# 2. V2.2 (적립금 대기 -> 리셋 시 합산)
+# 2. V2.2
 # =========================================================
 def run_v22(df, initial_cap, splits, monthly_amt, dep_day):
     cash = initial_cap
@@ -160,7 +154,7 @@ def run_v22(df, initial_cap, splits, monthly_amt, dep_day):
         
         if shares > 0 and avg_price > 0:
             profit_rate = (price - avg_price) / avg_price
-            if profit_rate >= 0.1: # 10% 수익 시 리셋
+            if profit_rate >= 0.1:
                 cash += shares * price
                 shares = 0; avg_price = 0; accumulated_buy = 0
                 cash += waiting_cash
@@ -187,7 +181,7 @@ def run_v22(df, initial_cap, splits, monthly_amt, dep_day):
     return equity
 
 # =========================================================
-# 3. V3.0 (적립금 대기 -> 리셋 시 합산)
+# 3. V3.0
 # =========================================================
 def run_v3(df, initial_cap, ticker_name, splits, monthly_amt, dep_day):
     cash = initial_cap
@@ -197,7 +191,6 @@ def run_v3(df, initial_cap, ticker_name, splits, monthly_amt, dep_day):
     accumulated_buy = 0
     one_time_budget = initial_cap / splits
     
-    # 티커별 변동성 계수 설정 (기본값 TQQQ 기준)
     target_pct = 15.0 if "TQQQ" in ticker_name or "SOXL" in ticker_name else 20.0
     t_factor = 1.5 if "TQQQ" in ticker_name or "SOXL" in ticker_name else 2.0
     
@@ -220,7 +213,7 @@ def run_v3(df, initial_cap, ticker_name, splits, monthly_amt, dep_day):
                 if quarter_mode_days == 0: sell_qty = shares * 0.25; quarter_mode_days = 1
                 else: quarter_mode_days += 1
                 if quarter_mode_days > 5: quarter_mode_days = 0
-                star_pct = -15.0 # 쿼터모드 시 하단 매수선 조정
+                star_pct = -15.0
             else:
                 quarter_mode_days = 0
             
@@ -241,7 +234,6 @@ def run_v3(df, initial_cap, ticker_name, splits, monthly_amt, dep_day):
                 if accumulated_buy < 0: accumulated_buy = 0
                 shares -= sell_qty
         
-        # 완전 매도 후 리셋 로직
         if shares <= 0.001:
             shares = 0; avg_price = 0; accumulated_buy = 0; quarter_mode_days = 0
             cash += waiting_cash
@@ -265,7 +257,7 @@ def run_v3(df, initial_cap, ticker_name, splits, monthly_amt, dep_day):
     return equity
 
 # =========================================================
-# 4. IBS (적립금 대기 -> 리셋 시 합산)
+# 4. IBS
 # =========================================================
 def run_ibs(df, initial_cap, ticker_name, splits, monthly_amt, dep_day):
     cash = initial_cap
@@ -328,7 +320,7 @@ def run_ibs(df, initial_cap, ticker_name, splits, monthly_amt, dep_day):
     return equity
 
 # =========================================================
-# 5. VR (즉시 반영: Pool 추가 + 목표가치 상향)
+# 5. VR
 # =========================================================
 def run_vr(df, initial_cap, target_cagr, band_pct, monthly_amt, dep_day):
     pool_cash = initial_cap * 0.5
@@ -376,6 +368,8 @@ if run_btn:
             st.error("데이터를 가져올 수 없습니다. (휴장일, 티커 오류, 혹은 네트워크 문제일 수 있습니다)")
         else:
             res = pd.DataFrame(index=df.index)
+            
+            # 1. 전략별 자산 계산
             res['Simple DCA (적립식)'] = run_simple_dca(df, initial_capital, monthly_amount, deposit_day)
             res[f'V1 ({split_v1_v2})'] = run_v1(df, initial_capital, split_v1_v2, monthly_amount, deposit_day)
             res[f'V2.2 ({split_v1_v2})'] = run_v22(df, initial_capital, split_v1_v2, monthly_amount, deposit_day)
@@ -383,21 +377,40 @@ if run_btn:
             res[f'IBS ({split_ibs})'] = run_ibs(df, initial_capital, ticker, split_ibs, monthly_amount, deposit_day)
             res[f'VR ({vr_target_return}%)'] = run_vr(df, initial_capital, vr_target_return, 5.0, monthly_amount, deposit_day)
             
-            # 그래프 그리기
+            # 2. [추가됨] 총 투입 원금(Principal) 정밀 계산
+            principal_list = []
+            current_principal = initial_capital
+            
+            # 첫날 이전의 적립금 누락 방지 및 날짜별 계산
+            for date in df.index:
+                if date.day == deposit_day:
+                    current_principal += monthly_amount
+                principal_list.append(current_principal)
+            
+            res['총 투입 원금'] = principal_list
+            
+            # 3. 그래프 그리기
             fig = px.line(res, x=res.index, y=res.columns, 
-                          title=f"🚀 {ticker} 전략별 수익금 비교 (월 ${monthly_amount} 적립)",
+                          title=f"🚀 {ticker} 전략별 수익금 vs 원금 비교 (월 ${monthly_amount} 적립)",
                           labels={"value": "평가 자산 (USD)", "variable": "전략"})
+            
+            # 4. '총 투입 원금' 선만 회색 점선으로 변경
+            fig.update_traces(
+                patch={"line": {"dash": "dot", "color": "gray", "width": 2}},
+                selector={"name": "총 투입 원금"}
+            )
+            
             st.plotly_chart(fig, use_container_width=True)
             
             st.write("### 🏁 최종 자산 현황")
-            # 대략적인 총 투입 원금 계산 (초기금 + 개월수 * 월적립금)
-            months_passed = len(df) // 21
-            est_principal = initial_capital + (monthly_amount * months_passed)
-            st.write(f"**분석 기간:** {start_date} ~ {df.index[-1].date()} | **총 투입 원금 (추산):** ${est_principal:,.0f}")
+            final_principal = res['총 투입 원금'].iloc[-1]
+            st.write(f"**분석 기간:** {start_date} ~ {df.index[-1].date()} | **최종 투입 원금:** ${final_principal:,.0f}")
             
-            # 최종 금액 표시 (카드 형태)
-            cols = st.columns(len(res.columns))
-            for i, col in enumerate(res.columns):
+            # 원금을 제외한 전략 컬럼만 필터링하여 카드 표시
+            cols = st.columns(len(res.columns) - 1)
+            strategy_cols = [c for c in res.columns if c != '총 투입 원금']
+            
+            for i, col in enumerate(strategy_cols):
                 final_val = res[col].iloc[-1]
-                profit_pct = ((final_val - est_principal) / est_principal) * 100
+                profit_pct = ((final_val - final_principal) / final_principal) * 100
                 cols[i].metric(label=col, value=f"${final_val:,.0f}", delta=f"{profit_pct:+.1f}%")
