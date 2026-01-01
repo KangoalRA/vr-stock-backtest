@@ -7,7 +7,7 @@ import math
 # --- 페이지 설정 ---
 st.set_page_config(page_title="VR & 적립식 백테스트", layout="wide")
 
-st.title("📊 라오어 전략 vs 적립식 존버 (동일 현금흐름 비교)")
+st.title("📊 라오어 전략 vs 적립식 존버 (호환성 개선판)")
 st.markdown("""
 **핵심 비교 포인트:**
 1. **Simple DCA (무지성 적립):** 월급 들어오면 그 날 바로 풀매수 (비교 기준)
@@ -17,7 +17,7 @@ st.markdown("""
 
 # --- 사이드바 설정 ---
 st.sidebar.header("📝 기본 및 적립 설정")
-ticker = st.sidebar.selectbox("티커 (Ticker)", ["SOXL", "TQQQ", "TECL", "UPRO"])
+ticker = st.sidebar.selectbox("티커 (Ticker)", ["SOXL", "TQQQ", "TECL", "UPRO", "TSLA", "NVDA"])
 start_date = st.sidebar.date_input("시작 날짜", value=pd.to_datetime("2021-01-01"))
 initial_capital = st.sidebar.number_input("초기 거치금 (USD)", value=10000, step=1000)
 
@@ -34,24 +34,45 @@ vr_target_return = st.sidebar.number_input("VR 연 목표 수익률 (%)", value=
 
 run_btn = st.sidebar.button("백테스트 실행 🚀")
 
-# --- 데이터 가져오기 (수정됨: 안정성 강화) ---
+# --- [핵심 수정] 데이터 가져오기 함수 (안정성 강화) ---
 @st.cache_data
 def get_data(ticker, start):
     try:
-        # multi_level_index=False 옵션 추가로 데이터 구조 꼬임 방지
-        df = yf.download(ticker, start=start, progress=False, multi_level_index=False)
+        # 1. 호환성을 위해 옵션 없이 기본 다운로드
+        df = yf.download(ticker, start=start, progress=False)
         
         if df.empty:
             return pd.DataFrame()
 
-        # 'Adj Close' 우선 사용, 없으면 'Close' 사용
-        col = 'Adj Close' if 'Adj Close' in df.columns else 'Close'
-        
-        # 필요한 컬럼만 남기고 이름 변경
-        df = df[[col]].rename(columns={col: 'Close'})
-        return df
+        # 2. 멀티 인덱스 컬럼(예: Price, Ticker) 처리 -> 1단 인덱스로 평탄화
+        if isinstance(df.columns, pd.MultiIndex):
+            # level 0이 보통 Price Type (Close, Open 등)
+            df.columns = df.columns.get_level_values(0)
+
+        # 3. 필요한 컬럼(Close 또는 Adj Close) 찾기
+        target_col = None
+        # 대소문자 구분 없이 찾기 위해 리스트 순회
+        possible_cols = ['Adj Close', 'adj close', 'Close', 'close']
+        for col in possible_cols:
+            if col in df.columns:
+                target_col = col
+                break
+
+        if target_col:
+            # 명시적으로 복사본 생성 (SettingWithCopyWarning 방지)
+            df_clean = df[[target_col]].copy()
+            df_clean.rename(columns={target_col: 'Close'}, inplace=True)
+            
+            # 데이터 타입 숫자로 강제 변환 및 결측치 제거
+            df_clean['Close'] = pd.to_numeric(df_clean['Close'], errors='coerce')
+            df_clean.dropna(inplace=True)
+            
+            return df_clean
+        else:
+            return pd.DataFrame()
+
     except Exception as e:
-        st.error(f"데이터 로딩 오류: {e}")
+        st.error(f"데이터 로딩 중 오류 발생: {e}")
         return pd.DataFrame()
 
 # =========================================================
@@ -96,7 +117,7 @@ def run_v1(df, initial_cap, splits, monthly_amt, dep_day):
             
         if shares > 0 and avg_price > 0:
             profit_rate = (price - avg_price) / avg_price
-            if profit_rate >= 0.1:
+            if profit_rate >= 0.1: # 10% 수익 시 리셋
                 cash += shares * price
                 shares = 0
                 avg_price = 0
@@ -139,7 +160,7 @@ def run_v22(df, initial_cap, splits, monthly_amt, dep_day):
         
         if shares > 0 and avg_price > 0:
             profit_rate = (price - avg_price) / avg_price
-            if profit_rate >= 0.1:
+            if profit_rate >= 0.1: # 10% 수익 시 리셋
                 cash += shares * price
                 shares = 0; avg_price = 0; accumulated_buy = 0
                 cash += waiting_cash
@@ -175,8 +196,11 @@ def run_v3(df, initial_cap, ticker_name, splits, monthly_amt, dep_day):
     avg_price = 0
     accumulated_buy = 0
     one_time_budget = initial_cap / splits
-    target_pct = 15.0 if ticker_name == "TQQQ" else 20.0
-    t_factor = 1.5 if ticker_name == "TQQQ" else 2.0
+    
+    # 티커별 변동성 계수 설정 (기본값 TQQQ 기준)
+    target_pct = 15.0 if "TQQQ" in ticker_name or "SOXL" in ticker_name else 20.0
+    t_factor = 1.5 if "TQQQ" in ticker_name or "SOXL" in ticker_name else 2.0
+    
     quarter_mode_days = 0
     equity = []
     
@@ -196,7 +220,7 @@ def run_v3(df, initial_cap, ticker_name, splits, monthly_amt, dep_day):
                 if quarter_mode_days == 0: sell_qty = shares * 0.25; quarter_mode_days = 1
                 else: quarter_mode_days += 1
                 if quarter_mode_days > 5: quarter_mode_days = 0
-                star_pct = -15.0 if ticker_name == "TQQQ" else -20.0
+                star_pct = -15.0 # 쿼터모드 시 하단 매수선 조정
             else:
                 quarter_mode_days = 0
             
@@ -217,6 +241,7 @@ def run_v3(df, initial_cap, ticker_name, splits, monthly_amt, dep_day):
                 if accumulated_buy < 0: accumulated_buy = 0
                 shares -= sell_qty
         
+        # 완전 매도 후 리셋 로직
         if shares <= 0.001:
             shares = 0; avg_price = 0; accumulated_buy = 0; quarter_mode_days = 0
             cash += waiting_cash
@@ -249,8 +274,10 @@ def run_ibs(df, initial_cap, ticker_name, splits, monthly_amt, dep_day):
     avg_price = 0
     accumulated_buy = 0
     one_time_budget = initial_cap / splits
-    target_pct = 15.0 if ticker_name == "TQQQ" else 20.0
-    t_factor = 3.0 if ticker_name == "TQQQ" else 4.0
+    
+    target_pct = 15.0 if "TQQQ" in ticker_name or "SOXL" in ticker_name else 20.0
+    t_factor = 3.0 if "TQQQ" in ticker_name or "SOXL" in ticker_name else 4.0
+    
     equity = []
     
     for i in range(len(df)):
@@ -342,10 +369,11 @@ def run_vr(df, initial_cap, target_cagr, band_pct, monthly_amt, dep_day):
 
 # --- 메인 실행 ---
 if run_btn:
-    with st.spinner('전략 엔진 가동 중...'):
+    with st.spinner('전략 엔진 가동 중... (데이터 다운로드 및 계산)'):
         df = get_data(ticker, start_date)
+        
         if df.empty:
-            st.error("데이터 로딩 실패")
+            st.error("데이터를 가져올 수 없습니다. (휴장일, 티커 오류, 혹은 네트워크 문제일 수 있습니다)")
         else:
             res = pd.DataFrame(index=df.index)
             res['Simple DCA (적립식)'] = run_simple_dca(df, initial_capital, monthly_amount, deposit_day)
@@ -355,13 +383,21 @@ if run_btn:
             res[f'IBS ({split_ibs})'] = run_ibs(df, initial_capital, ticker, split_ibs, monthly_amount, deposit_day)
             res[f'VR ({vr_target_return}%)'] = run_vr(df, initial_capital, vr_target_return, 5.0, monthly_amount, deposit_day)
             
-            fig = px.line(res, x=res.index, y=res.columns, title=f"🚀 {ticker} 적립식 전략 비교 (월 ${monthly_amount} 투입)")
-            st.plotly_chart(fig)
+            # 그래프 그리기
+            fig = px.line(res, x=res.index, y=res.columns, 
+                          title=f"🚀 {ticker} 전략별 수익금 비교 (월 ${monthly_amount} 적립)",
+                          labels={"value": "평가 자산 (USD)", "variable": "전략"})
+            st.plotly_chart(fig, use_container_width=True)
             
             st.write("### 🏁 최종 자산 현황")
-            st.write(f"**기간:** {start_date} ~ {df.index[-1].date()} | **총 투입 원금 (추산):** ${initial_capital + monthly_amount * (len(df)//21):,.0f}")
+            # 대략적인 총 투입 원금 계산 (초기금 + 개월수 * 월적립금)
+            months_passed = len(df) // 21
+            est_principal = initial_capital + (monthly_amount * months_passed)
+            st.write(f"**분석 기간:** {start_date} ~ {df.index[-1].date()} | **총 투입 원금 (추산):** ${est_principal:,.0f}")
             
+            # 최종 금액 표시 (카드 형태)
             cols = st.columns(len(res.columns))
             for i, col in enumerate(res.columns):
-                final = res[col].iloc[-1]
-                cols[i].metric(col, f"${final:,.0f}")
+                final_val = res[col].iloc[-1]
+                profit_pct = ((final_val - est_principal) / est_principal) * 100
+                cols[i].metric(label=col, value=f"${final_val:,.0f}", delta=f"{profit_pct:+.1f}%")
